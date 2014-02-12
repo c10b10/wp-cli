@@ -73,16 +73,66 @@ class Runner {
 		} );
 	}
 
-	private static function set_wp_root( $config ) {
-		$path = getcwd();
+	/**
+	 * Attempts to find the path to the WP install inside index.php
+	 */
+	private static function extract_subdir_path( $index_path ) {
+		$index_code = file_get_contents( $index_path );
 
-		if ( !empty( $config['path'] ) ) {
-			if ( Utils\is_path_absolute( $config['path'] ) )
-				$path = $config['path'];
-			else
-				$path .= '/' . $config['path'];
+		if ( !preg_match( '|^\s*require\s*\(?\s*(.+?)/wp-blog-header\.php([\'"])|m', $index_code, $matches ) ) {
+			return false;
 		}
 
+		$wp_path_src = $matches[1] . $matches[2];
+		$wp_path_src = Utils\replace_path_consts( $wp_path_src, $index_path );
+		$wp_path = eval( "return $wp_path_src;" );
+
+		if ( !Utils\is_path_absolute( $wp_path ) ) {
+			$wp_path = dirname( $index_path ) . "/$wp_path";
+		}
+
+		return $wp_path;
+	}
+
+	/**
+	 * Find the directory that contains the WordPress files. Defaults to the current working dir.
+	 *
+	 * @return string An absolute path
+	 */
+	private function find_wp_root() {
+		if ( !empty( $this->config['path'] ) ) {
+			$path = $this->config['path'];
+			if ( !Utils\is_path_absolute( $path ) )
+				$path = getcwd() . '/' . $path;
+
+			return $path;
+		}
+
+		if ( $this->cmd_starts_with( array( 'core', 'download' ) ) ) {
+			return getcwd();
+		}
+
+		$dir = getcwd();
+
+		while ( is_readable( $dir ) ) {
+			if ( file_exists( "$dir/wp-load.php" ) ) {
+				return $dir;
+			}
+
+			if ( file_exists( "$dir/index.php" ) ) {
+				if ( $path = self::extract_subdir_path( "$dir/index.php" ) )
+					return $path;
+			}
+
+			$parent_dir = dirname( $dir );
+			if ( empty($parent_dir) || $parent_dir === $dir ) {
+				break;
+			}
+			$dir = $parent_dir;
+		}
+	}
+
+	private static function set_wp_root( $path ) {
 		define( 'ABSPATH', rtrim( $path, '/' ) . '/' );
 
 		$_SERVER['DOCUMENT_ROOT'] = realpath( $path );
@@ -92,17 +142,10 @@ class Runner {
 		if ( !isset( $assoc_args['user'] ) )
 			return;
 
-		$user = $assoc_args['user'];
+		$fetcher = new \WP_CLI\Fetchers\User;
+		$user = $fetcher->get_check( $assoc_args['user'] );
+		wp_set_current_user( $user->ID );
 
-		if ( is_numeric( $user ) ) {
-			$user_id = (int) $user;
-		} else {
-			$user_id = (int) username_exists( $user );
-		}
-
-		if ( !$user_id || !wp_set_current_user( $user_id ) ) {
-			\WP_CLI::error( "Could not find user: $user" );
-		}
 	}
 
 	private static function guess_url( $assoc_args ) {
@@ -115,10 +158,6 @@ class Runner {
 			if ( true === $url ) {
 				WP_CLI::warning( 'The --url parameter expects a value.' );
 			}
-		} elseif ( is_readable( ABSPATH . 'wp-cli-blog' ) ) {
-			WP_CLI::warning( 'The wp-cli-blog file is deprecated. Use wp-cli.yml instead.' );
-
-			$url = trim( file_get_contents( ABSPATH . 'wp-cli-blog' ) );
 		} elseif ( $wp_config_path = Utils\locate_wp_config() ) {
 			// Try to find the blog parameter in the wp-config file
 			$wp_config_file = file_get_contents( $wp_config_path );
@@ -221,14 +260,6 @@ class Runner {
 	public function get_wp_config_code() {
 		$wp_config_path = Utils\locate_wp_config();
 
-		$replacements = array(
-			'__FILE__' => "'$wp_config_path'",
-			'__DIR__'  => "'" . dirname( $wp_config_path ) . "'"
-		);
-
-		$old = array_keys( $replacements );
-		$new = array_values( $replacements );
-
 		$wp_config_code = explode( "\n", file_get_contents( $wp_config_path ) );
 
 		$lines_to_run = array();
@@ -237,10 +268,12 @@ class Runner {
 			if ( preg_match( '/^\s*require.+wp-settings\.php/', $line ) )
 				continue;
 
-			$lines_to_run[] = str_replace( $old, $new, $line );
+			$lines_to_run[] = $line;
 		}
 
-		return preg_replace( '|^\s*\<\?php\s*|', '', implode( "\n", $lines_to_run ) );
+		$source = implode( "\n", $lines_to_run );
+		$source = Utils\replace_path_consts( $source, $wp_config_path );
+		return preg_replace( '|^\s*\<\?php\s*|', '', $source );
 	}
 
 	// Transparently convert old syntaxes
@@ -390,16 +423,41 @@ class Runner {
 		}
 
 		list( $this->config, $this->extra_config ) = $configurator->to_array();
+	}
 
-		if ( !isset( $this->config['path'] ) ) {
-			$this->config['path'] = dirname( Utils\find_file_upward( 'wp-load.php' ) );
-		}
+	private function check_root() {
+		if ( $this->config['allow-root'] )
+			return; # they're aware of the risks!
+		if ( !function_exists( 'posix_geteuid') )
+			return; # posix functions not available
+		if ( posix_geteuid() !== 0 )
+			return; # not root
+
+		WP_CLI::error(
+			"YIKES! It looks like you're running this as root. You probably meant to " .
+			"run this as the user that your WordPress install exists under.\n" .
+			"\n" .
+			"If you REALLY mean to run this as root, we won't stop you, but just " .
+			"bear in mind that any code on this site will then have full control of " .
+			"your server, making it quite DANGEROUS.\n" .
+			"\n" .
+			"If you'd like to continue as root, please run this again, adding this " .
+			"flag:  --allow-root\n" .
+			"\n" .
+			"If you'd like to run it as the user that this site is under, you can " .
+			"run the following to become the respective user:\n" .
+			"\n" .
+			"    sudo -u USER -i -- wp ...\n" .
+			"\n"
+		);
 	}
 
 	public function before_wp_load() {
 		$this->init_config();
 		$this->init_colorization();
 		$this->init_logger();
+
+		$this->check_root();
 
 		if ( empty( $this->arguments ) )
 			$this->arguments[] = 'help';
@@ -426,7 +484,7 @@ class Runner {
 		}
 
 		// Handle --path parameter
-		self::set_wp_root( $this->config );
+		self::set_wp_root( $this->find_wp_root() );
 
 		// First try at showing man page
 		if ( 'help' === $this->arguments[0] && ( isset( $this->arguments[1] ) || !$this->wp_exists() ) ) {
@@ -459,6 +517,10 @@ class Runner {
 			exit;
 		}
 
+		if ( $this->cmd_starts_with( array( 'core', 'is-installed' ) ) ) {
+			define( 'WP_INSTALLING', true );
+		}
+
 		if (
 			count( $this->arguments ) >= 2 &&
 			$this->arguments[0] == 'core' &&
@@ -486,6 +548,10 @@ class Runner {
 		if ( $this->cmd_starts_with( array( 'import') ) ) {
 			define( 'WP_LOAD_IMPORTERS', true );
 			define( 'WP_IMPORTING', true );
+		}
+
+		if ( $this->cmd_starts_with( array( 'plugin' ) ) ) {
+			$GLOBALS['pagenow'] = 'plugins.php';
 		}
 	}
 

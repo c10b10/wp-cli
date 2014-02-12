@@ -40,7 +40,7 @@ Feature: Global flags
       """
     And STDERR should contain:
       """
-      PHP Notice:  Use of undefined constant CONST_WITHOUT_QUOTES
+      Use of undefined constant CONST_WITHOUT_QUOTES
       """
 
   Scenario: Setting the WP user
@@ -58,11 +58,17 @@ Feature: Global flags
       admin
       """
 
+    When I run `wp --user=admin@example.com eval 'echo wp_get_current_user()->user_login;'`
+    Then STDOUT should be:
+      """
+      admin
+      """
+
     When I try `wp --user=non-existing-user eval 'echo wp_get_current_user()->user_login;'`
     Then the return code should be 1
     And STDERR should be:
       """
-      Error: Could not find user: non-existing-user
+      Error: Invalid user ID, email or login: 'non-existing-user'
       """
 
   Scenario: Using a custom logger
@@ -84,6 +90,55 @@ Feature: Global flags
     Then STDOUT should be:
       """
       log: called 'error' method
+      """
+
+  Scenario: Skipping plugins
+    Given a WP install
+    And I run `wp plugin activate hello akismet`
+
+    When I run `wp eval 'var_export( defined("AKISMET_VERSION") );'`
+    Then STDOUT should be:
+      """
+      true
+      """
+
+    When I run `wp eval 'var_export( function_exists( "hello_dolly" ) );'`
+    Then STDOUT should be:
+      """
+      true
+      """
+
+    # The specified plugin should be skipped
+    When I run `wp --skip-plugins=akismet eval 'var_export( defined("AKISMET_VERSION") );'`
+    Then STDOUT should be:
+      """
+      false
+      """
+
+    # The specified plugin should still show up as an active plugin
+    When I run `wp --skip-plugins=akismet plugin status`
+    Then STDOUT should contain:
+      """
+      akismet
+      """
+
+    # The un-specified plugin should continue to be loaded
+    When I run `wp --skip-plugins=akismet eval 'var_export( function_exists( "hello_dolly" ) );'`
+    Then STDOUT should be:
+      """
+      true
+      """
+
+    # No plugins should be loaded when --skip-plugins doesn't have a value
+    When I run `wp --skip-plugins eval 'var_export( defined("AKISMET_VERSION") );'`
+    Then STDOUT should be:
+      """
+      false
+      """
+    When I run `wp --skip-plugins eval 'var_export( function_exists( "hello_dolly" ) );'`
+    Then STDOUT should be:
+      """
+      false
       """
 
   Scenario: Using --require

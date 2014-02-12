@@ -115,7 +115,7 @@ class Post_Command extends \WP_CLI\CommandWithDBObject {
 	public function edit( $args, $_ ) {
 		$post = $this->fetcher->get_check( $args[0] );
 
-		$r = $this->_edit( $post->post_content, "WP-CLI post $post_id" );
+		$r = $this->_edit( $post->post_content, "WP-CLI post {$post->ID}" );
 
 		if ( $r === false )
 			\WP_CLI::warning( 'No change made to post content.', 'Aborted' );
@@ -210,7 +210,7 @@ class Post_Command extends \WP_CLI\CommandWithDBObject {
 	 * : Limit the output to specific object fields. Defaults to ID,post_title,post_name,post_date,post_status.
 	 *
 	 * [--format=<format>]
-	 * : Accepted values: table, csv, json, count. Default: table
+	 * : Accepted values: table, csv, json, count, ids. Default: table
 	 *
 	 * ## EXAMPLES
 	 *
@@ -220,9 +220,11 @@ class Post_Command extends \WP_CLI\CommandWithDBObject {
 	 *
 	 *     wp post list --post_type=page --fields=post_title,post_status
 	 *
+	 *     wp post list --post_type=page,post --format=ids
+	 *
 	 * @subcommand list
 	 */
-	public function _list( $_, $assoc_args ) {
+	public function list_( $_, $assoc_args ) {
 		$formatter = $this->get_formatter( $assoc_args );
 
 		$defaults = array(
@@ -232,8 +234,10 @@ class Post_Command extends \WP_CLI\CommandWithDBObject {
 		$query_args = array_merge( $defaults, $assoc_args );
 
 		foreach ( $query_args as $key => $query_arg ) {
-			if ( false !== strpos( $key, '__' ) )
+			if ( false !== strpos( $key, '__' )
+				|| ( 'post_type' == $key && 'any' != $query_arg ) ) {
 				$query_args[$key] = explode( ',', $query_arg );
+			}
 		}
 
 		if ( 'ids' == $formatter->format )
@@ -263,10 +267,10 @@ class Post_Command extends \WP_CLI\CommandWithDBObject {
 	 *
 	 * [--post_date=<yyyy-mm-dd>]
 	 * : The date of the generated posts. Default: current date
-	 * 
+	 *
 	 * [--post_content]
 	 * : If set, the command reads the post_content from STDIN.
-	 * 
+	 *
 	 * [--max_depth=<number>]
 	 * : For hierarchical post types, generate child posts down to a certain depth. Default: 1
 	 *
@@ -316,6 +320,7 @@ class Post_Command extends \WP_CLI\CommandWithDBObject {
 
 		$notify = \WP_CLI\Utils\make_progress_bar( 'Generating posts', $count );
 
+		$previous_post_id = 0;
 		$current_depth = 1;
 		$current_parent = 0;
 
@@ -325,7 +330,7 @@ class Post_Command extends \WP_CLI\CommandWithDBObject {
 
 				if( $this->maybe_make_child() && $current_depth < $max_depth ) {
 
-					$current_parent = $post_ids[$i-1];
+					$current_parent = $previous_post_id;
 					$current_depth++;
 
 				} else if( $this->maybe_reset_depth() ) {
@@ -347,12 +352,35 @@ class Post_Command extends \WP_CLI\CommandWithDBObject {
 				'post_content' => $post_content,
 			);
 
-			wp_insert_post( $args, true );
+			$post_id = wp_insert_post( $args, true );
+			if ( is_wp_error( $post_id ) ) {
+				WP_CLI::warning( $post_id );
+			} else {
+				$previous_post_id = $post_id;
+			}
 
 			$notify->tick();
 		}
 		$notify->finish();
 		// @codingStandardsIgnoreEnd
+	}
+
+	/**
+	 * Get post url
+	 *
+	 * ## OPTIONS
+	 *
+	 * <id>...
+	 * : One or more IDs of posts get the URL.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp post url 123
+	 *
+	 *     wp post url 123 324
+	 */
+	public function url( $args ) {
+		parent::_url( $args, 'get_permalink' );
 	}
 
 	private function maybe_make_child() {
