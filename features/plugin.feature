@@ -108,6 +108,15 @@ Feature: Manage WordPress plugins
       | name       | status   | update    | version   |
       | akismet    | active   | available | 2.5.6     |
 
+    When I try `wp plugin update`
+    Then STDERR should be:
+      """
+      Error: Please specify one or more plugins, or use --all.
+      """
+
+    When I run `wp plugin update --all`
+    Then STDOUT should not be empty
+
   Scenario: Activate a network-only plugin
     Given a WP multisite install
     And a wp-content/plugins/network-only.php file:
@@ -121,6 +130,17 @@ Feature: Manage WordPress plugins
       """
           Status: Network Active
       """
+
+  Scenario: Network activate a plugin
+    Given a WP multisite install
+
+    When I run `wp plugin install user-switching --activate-network`
+    Then STDOUT should not be empty
+
+    When I run `wp plugin list --fields=name,status`
+    Then STDOUT should be a table containing rows:
+      | name            | status           |
+      | user-switching  | active-network   |
 
   Scenario: List plugins
     Given a WP install

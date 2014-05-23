@@ -62,16 +62,20 @@ class User_Command extends \WP_CLI\CommandWithDBObject {
 
 		$users = get_users( $assoc_args );
 
-		$it = WP_CLI\Utils\iterator_map( $users, function ( $user ) {
-			if ( !is_object( $user ) )
+		if ( 'ids' == $formatter->format ) {
+			echo implode( ' ', $users );
+		} else {
+			$it = WP_CLI\Utils\iterator_map( $users, function ( $user ) {
+				if ( !is_object( $user ) )
+					return $user;
+
+				$user->roles = implode( ',', $user->roles );
+
 				return $user;
+			} );
 
-			$user->roles = implode( ',', $user->roles );
-
-			return $user;
-		} );
-
-		$formatter->display_items( $it );
+			$formatter->display_items( $it );
+		}
 	}
 
 	/**
@@ -104,38 +108,54 @@ class User_Command extends \WP_CLI\CommandWithDBObject {
 	}
 
 	/**
-	 * Delete one or more users.
+	 * Delete one or more users from the current site.
 	 *
 	 * ## OPTIONS
 	 *
 	 * <user>...
 	 * : The user login, user email, or user ID of the user(s) to update.
 	 *
+	 * [--network]
+	 * : On multisite, delete the user from the entire network.
+	 *
 	 * [--reassign=<user-id>]
 	 * : User ID to reassign the posts to.
 	 *
+	 * [--yes]
+	 * : Answer yes to any confirmation propmts.
+	 *
 	 * ## EXAMPLES
 	 *
+	 *     # Delete user 123 and reassign posts to user 567
 	 *     wp user delete 123 --reassign=567
 	 */
 	public function delete( $args, $assoc_args ) {
-		$assoc_args = wp_parse_args( $assoc_args, array(
-			'reassign' => null
-		) );
+		$network = isset( $assoc_args['network'] ) && is_multisite();
+		$reassign = isset( $assoc_args['reassign'] ) ? $assoc_args['reassign'] : null;
+
+		if ( $network && $reassign ) {
+			WP_CLI::error('Reassigning content to a different user is not supported on multisite.');
+		}
+
+		if ( !$reassign ) {
+			WP_CLI::confirm( '--reassign parameter not passed. All associated posts will be deleted. Proceed?', $assoc_args );
+		}
 
 		$users = $this->fetcher->get_many( $args );
 
-		parent::_delete( $users, $assoc_args, function ( $user, $assoc_args ) {
+		parent::_delete( $users, $assoc_args, function ( $user ) use ( $network, $reassign ) {
 			$user_id = $user->ID;
 
-			if ( is_multisite() ) {
+			if ( $network ) {
 				$r = wpmu_delete_user( $user_id );
+				$message = "Deleted user $user_id.";
 			} else {
-				$r = wp_delete_user( $user_id, $assoc_args['reassign'] );
+				$r = wp_delete_user( $user_id, $reassign );
+				$message = "Removed user $user_id from " . home_url();
 			}
 
 			if ( $r ) {
-				return array( 'success', "Deleted user $user_id." );
+				return array( 'success', $message );
 			} else {
 				return array( 'error', "Failed deleting user $user_id." );
 			}
@@ -164,6 +184,9 @@ class User_Command extends \WP_CLI\CommandWithDBObject {
 	 *
 	 * [--display_name=<name>]
 	 * : The display name.
+	 *
+	 * [--send-email]
+	 * : Send an email to the user with their new account details.
 	 *
 	 * [--porcelain]
 	 * : Output just the new user id.
@@ -196,15 +219,16 @@ class User_Command extends \WP_CLI\CommandWithDBObject {
 
 		if ( isset( $assoc_args['role'] ) ) {
 			$role = $assoc_args['role'];
-			if ( !self::validate_role( $role ) ) {
-				WP_CLI::error( "Invalid role: $role" );
-			}
+			self::validate_role( $role );
 		} else {
 			$role = get_option('default_role');
 		}
 		$user->role = $role;
 
 		$user_id = wp_insert_user( $user );
+		if ( isset( $assoc_args['send-email'] ) ) {
+			wp_new_user_notification( $user_id, $user->user_pass );
+		}
 
 		if ( is_wp_error( $user_id ) ) {
 			WP_CLI::error( $user_id );
@@ -275,8 +299,8 @@ class User_Command extends \WP_CLI\CommandWithDBObject {
 
 		$role = $assoc_args['role'];
 
-		if ( !self::validate_role( $role ) ) {
-			WP_CLI::error( "Invalid role: $role" );
+		if ( ! empty( $role ) ) {
+			self::validate_role( $role );
 		}
 
 		$user_count = count_users();
@@ -332,6 +356,8 @@ class User_Command extends \WP_CLI\CommandWithDBObject {
 
 		$role = isset( $args[1] ) ? $args[1] : get_option( 'default_role' );
 
+		self::validate_role( $role );
+
 		// Multisite
 		if ( function_exists( 'add_user_to_blog' ) )
 			add_user_to_blog( get_current_blog_id(), $user->ID, $role );
@@ -364,6 +390,8 @@ class User_Command extends \WP_CLI\CommandWithDBObject {
 
 		$role = $args[1];
 
+		self::validate_role( $role );
+
 		$user->add_role( $role );
 
 		WP_CLI::success( sprintf( "Added '%s' role for %s (%d).", $role, $user->user_login, $user->ID ) );
@@ -392,6 +420,8 @@ class User_Command extends \WP_CLI\CommandWithDBObject {
 
 		if ( isset( $args[1] ) ) {
 			$role = $args[1];
+
+			self::validate_role( $role );
 
 			$user->remove_role( $role );
 
@@ -503,6 +533,9 @@ class User_Command extends \WP_CLI\CommandWithDBObject {
 	 * <file>
 	 * : The CSV file of users to import.
 	 *
+	 * [--send-email]
+	 * : Send an email to new users with their account details.
+	 *
 	 * ## EXAMPLES
 	 *
 	 *     wp user import-csv /path/to/users.csv
@@ -562,6 +595,9 @@ class User_Command extends \WP_CLI\CommandWithDBObject {
 			} else {
 				unset( $new_user['ID'] ); // Unset else it will just return the ID
 				$user_id = wp_insert_user( $new_user );
+				if ( isset( $assoc_args['send-email'] ) ) {
+					wp_new_user_notification( $user_id, $new_user['user_pass'] );
+				}
 			}
 
 			if ( is_wp_error( $user_id ) ) {
@@ -581,12 +617,19 @@ class User_Command extends \WP_CLI\CommandWithDBObject {
 		}
 	}
 
+	/**
+	 * Check whether the role is valid
+	 *
+	 * @param string
+	 */
 	private static function validate_role( $role ) {
-		if ( empty( $role ) || ! is_null( get_role( $role ) ) ) {
-			return true;
+
+		if ( ! empty( $role ) && is_null( get_role( $role ) ) ) {
+			WP_CLI::error( sprintf( "Role doesn't exist: %s", $role ) );
 		}
-		return false;
+
 	}
+
 }
 
 /**
@@ -698,6 +741,7 @@ class User_Meta_Command extends \WP_CLI\CommandWithMeta {
 		$args[0] = $user->ID;
 		return $args;
 	}
+
 }
 
 WP_CLI::add_command( 'user', 'User_Command' );
